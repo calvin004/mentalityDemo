@@ -1,0 +1,81 @@
+import pandas as pd
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.model_selection import train_test_split
+
+#加载数据
+data = pd.read_excel('表1_儿童（学龄前，四川，2021）心理健康数据集_example.xlsx')
+dic = pd.read_excel('表1_儿童（学龄前，四川，2021）心理健康数据集_example_dic.xlsx')
+#计算出生年月为年龄
+data['q01021'] = pd.to_datetime(data['q01021'], format='%Y/%m', errors='coerce')
+data['age_months'] = (pd.to_datetime('2021-04') - data['q01021']).dt.days // 30
+# 处理缺失值
+data.fillna({'q01021': '9999', 'age_months': 0}, inplace=True)  # 异常值处理
+data.fillna(data.mode().iloc[0], inplace=True)  # 其他字段用众数填充
+
+# 定义静态特征和序列特征
+static_features = data[['q0101', 'age_months', 'q0103', 'q0105', 'q0106', 'q0207', 'q0203', 'q0204']]
+sequence_features = data.loc[:, 'q0501':'q0525']
+
+# 处理目标变量（假设目标变量为 q0404 是否频繁打骂）
+labels = data['q0404'].apply(lambda x: 1 if x >= 2 else 0)  # 假设2表示高频打骂
+# 分类变量和数值变量
+categorical_features = ['q0101', 'q0103', 'q0105', 'q0106', 'q0203', 'q0204']
+numerical_features = ['age_months', 'q0207']
+
+# 预处理管道
+preprocessor = ColumnTransformer(
+    transformers=[
+        ('num', StandardScaler(), numerical_features),
+        ('cat', OneHotEncoder(handle_unknown='ignore'), categorical_features)
+    ])
+
+static_processed = preprocessor.fit_transform(static_features)
+from sklearn.model_selection import train_test_split
+
+# 划分训练集和测试集
+X_static_train, X_static_test, X_seq_train, X_seq_test, y_train, y_test = train_test_split(
+    static_processed, sequence_features.values, labels, test_size=0.2, random_state=42)
+
+# 序列特征转换为3D张量 [样本数, 时间步长, 特征维度]
+X_seq_train = X_seq_train.reshape((X_seq_train.shape[0], X_seq_train.shape[1], 1))
+X_seq_test = X_seq_test.reshape((X_seq_test.shape[0], X_seq_test.shape[1], 1))
+
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Input, Conv1D, MaxPooling1D, Flatten, Dense, concatenate
+
+# 静态特征输入
+static_input = Input(shape=(X_static_train.shape[1],))
+# 序列特征输入
+sequence_input = Input(shape=(X_seq_train.shape[1], 1))
+
+# CNN处理序列
+conv1 = Conv1D(filters=64, kernel_size=3, activation='relu')(sequence_input)
+pool1 = MaxPooling1D(pool_size=2)(conv1)
+conv2 = Conv1D(filters=128, kernel_size=3, activation='relu')(pool1)
+pool2 = MaxPooling1D(pool_size=2)(conv2)
+flatten = Flatten()(pool2)
+
+# 静态特征全连接层
+dense_static = Dense(32, activation='relu')(static_input)
+
+# 合并特征
+combined = concatenate([flatten, dense_static])
+
+# 输出层
+output = Dense(1, activation='sigmoid')(combined)
+
+model = Model(inputs=[static_input, sequence_input], outputs=output)
+model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+model.summary()
+
+history = model.fit(
+    [X_static_train, X_seq_train], y_train,
+    epochs=15,
+    batch_size=32,
+    validation_split=0.2,
+    verbose=1
+)
+
+test_loss, test_acc = model.evaluate([X_static_test, X_seq_test], y_test)
+print(f'Test Accuracy: {test_acc:.4f}')
